@@ -18,11 +18,12 @@ package clusterapi
 
 import (
 	"fmt"
-	"k8s.io/klog/v2"
 	"os"
 	"strconv"
 	"strings"
 	"sync"
+
+	"k8s.io/klog/v2"
 
 	"github.com/pkg/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -200,6 +201,9 @@ func machineSetHasMachineDeploymentOwnerRef(machineSet *unstructured.Unstructure
 // normalizedProviderString splits s on '/' returning everything after
 // the last '/'.
 func normalizedProviderString(s string) normalizedProviderID {
+	if strings.HasPrefix(s, "azure://") && strings.Contains(s, "virtualMachineScaleSets") {
+		return normalizedProviderID(s)
+	}
 	split := strings.Split(s, "/")
 	return normalizedProviderID(split[len(split)-1])
 }
@@ -335,7 +339,7 @@ func GetDefaultScaleFromZeroArchitecture() SystemArchitecture {
 	once.Do(func() {
 		archStr := os.Getenv(scaleUpFromZeroDefaultArchEnvVar)
 		arch := SystemArchitectureFromString(archStr)
-		klog.V(5).Infof("the default scale from zero architecture value is set to %s (%s)", scaleUpFromZeroDefaultArchEnvVar, archStr, arch.Name())
+		klog.V(5).Infof("the default scale from zero architecture value is set to %s (%s)", archStr, arch.Name())
 		if arch == UnknownArch {
 			arch = DefaultArch
 			klog.Errorf("Unrecognized architecture '%s', falling back to %s",

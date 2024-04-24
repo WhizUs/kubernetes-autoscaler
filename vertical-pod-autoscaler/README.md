@@ -22,6 +22,7 @@
   - [Resource Policy Overriding Limit Range](#resource-policy-overriding-limit-range)
   - [Starting multiple recommenders](#starting-multiple-recommenders)
   - [Using CPU management with static policy](#using-cpu-management-with-static-policy)
+  - [Controlling eviction behavior based on scaling direction and resource](#controlling-eviction-behavior-based-on-scaling-direction-and-resource)
 - [Known limitations](#known-limitations)
 - [Related links](#related-links)
 
@@ -49,12 +50,13 @@ procedure described below.
 
 # Installation
 
-The current default version is Vertical Pod Autoscaler 0.14.0
+The current default version is Vertical Pod Autoscaler 1.1.0
 
 ### Compatibility
 
 | VPA version     | Kubernetes version |
 |-----------------|--------------------|
+| 1.1             | 1.25+              |
 | 1.0             | 1.25+              |
 | 0.14            | 1.25+              |
 | 0.13            | 1.25+              |
@@ -65,6 +67,31 @@ The current default version is Vertical Pod Autoscaler 0.14.0
 | 0.8             | 1.13+              |
 | 0.4 to 0.7      | 1.11+              |
 | 0.3.X and lower | 1.7+               |
+
+### Notice on CRD update (>=1.0.0)
+**NOTE:** In version 1.0.0, we have updated the CRD definition and added RBAC for the
+status resource. If you are upgrading from version (<=0.14.0), you must update the CRD
+definition and RBAC.
+```shell
+kubectl apply -f https://raw.githubusercontent.com/kubernetes/autoscaler/vpa-release-1.0/vertical-pod-autoscaler/deploy/vpa-v1-crd-gen.yaml
+kubectl apply -f https://raw.githubusercontent.com/kubernetes/autoscaler/vpa-release-1.0/vertical-pod-autoscaler/deploy/vpa-rbac.yaml
+```
+Another method is to re-execute the ./hack/vpa-process-yamls.sh script.
+```shell
+git clone https://github.com/kubernetes/autoscaler.git
+cd autoscaler/vertical-pod-autoscaler
+git checkout origin/vpa-release-1.0
+REGISTRY=registry.k8s.io/autoscaling TAG=1.0.0 ./hack/vpa-process-yamls.sh apply
+```
+
+If you need to roll back to version (<=0.14.0), please check out the release for your
+rollback version and execute ./hack/vpa-process-yamls.sh. For example, to rollback to 0.14.0:
+```shell
+git checkout origin/vpa-release-0.14
+REGISTRY=registry.k8s.io/autoscaling TAG=0.14.0 ./hack/vpa-process-yamls.sh apply
+kubectl delete clusterrole system:vpa-status-actor
+kubectl delete clusterrolebinding system:vpa-status-actor
+```
 
 ### Notice on deprecation of v1beta2 version (>=0.13.0)
 **NOTE:** In 0.13.0 we deprecate `autoscaling.k8s.io/v1beta2` API. We plan to
@@ -266,7 +293,7 @@ It will maintain limit to request ratio specified for all containers.
 
 VPA will try to cap recommendations between min and max of
 [limit ranges](https://kubernetes.io/docs/concepts/policy/limit-range/). If limit range conflicts
-and VPA resource policy conflict, VPA will follow VPA policy (and set values outside the limit
+with VPA resource policy, VPA will follow VPA policy (and set values outside the limit
 range).
 
 To disable getting VPA recommendations for an individual container, set `mode` to `"Off"` in `containerPolicies`.
@@ -358,8 +385,12 @@ vpa-post-processor.kubernetes.io/{containerName}_integerCPU=true
   recreated. This can be partly
   addressed by using VPA together with [Cluster Autoscaler](https://github.com/kubernetes/autoscaler/blob/master/cluster-autoscaler/FAQ.md#basics).
 * VPA does not update resources of pods which are not run under a controller.
-* Vertical Pod Autoscaler **should not be used with the [Horizontal Pod Autoscaler](https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/#support-for-resource-metrics) (HPA) on CPU or memory** at this moment.
-  However, you can use VPA with [HPA on custom and external metrics](https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/#scaling-on-custom-metrics).
+* Vertical Pod Autoscaler **should not be used with the [Horizontal Pod
+  Autoscaler](https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/#support-for-resource-metrics)
+  (HPA) on the same resource metric (CPU or memory)** at this moment. However, you can use [VPA with
+  HPA on separate resource metrics](https://github.com/kubernetes/autoscaler/issues/6247) (e.g. VPA
+  on memory and HPA on CPU) as well as with [HPA on custom and external
+  metrics](https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/#scaling-on-custom-metrics).
 * The VPA admission controller is an admission webhook. If you add other admission webhooks
   to your cluster, it is important to analyze how they interact and whether they may conflict
   with each other. The order of admission controllers is defined by a flag on API server.

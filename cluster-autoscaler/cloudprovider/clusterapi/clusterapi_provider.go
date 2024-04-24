@@ -17,6 +17,7 @@ limitations under the License.
 package clusterapi
 
 import (
+	"fmt"
 	"reflect"
 
 	corev1 "k8s.io/api/core/v1"
@@ -84,7 +85,14 @@ func (p *provider) NodeGroupForNode(node *corev1.Node) (cloudprovider.NodeGroup,
 
 // HasInstance returns whether a given node has a corresponding instance in this cloud provider
 func (p *provider) HasInstance(node *corev1.Node) (bool, error) {
-	return true, cloudprovider.ErrNotImplemented
+	machineID := node.Annotations[machineAnnotationKey]
+
+	machine, err := p.controller.findMachine(machineID)
+	if machine != nil {
+		return true, nil
+	}
+
+	return false, fmt.Errorf("machine not found for node %s: %v", node.Name, err)
 }
 
 func (*provider) Pricing() (cloudprovider.PricingModel, errors.AutoscalerError) {
@@ -151,20 +159,24 @@ func newProvider(
 func BuildClusterAPI(opts config.AutoscalingOptions, do cloudprovider.NodeGroupDiscoveryOptions, rl *cloudprovider.ResourceLimiter) cloudprovider.CloudProvider {
 	managementKubeconfig := opts.CloudConfig
 	if managementKubeconfig == "" && !opts.ClusterAPICloudConfigAuthoritative {
-		managementKubeconfig = opts.KubeConfigPath
+		managementKubeconfig = opts.KubeClientOpts.KubeConfigPath
 	}
 
 	managementConfig, err := clientcmd.BuildConfigFromFlags("", managementKubeconfig)
 	if err != nil {
 		klog.Fatalf("cannot build management cluster config: %v", err)
 	}
+	managementConfig.QPS = opts.KubeClientOpts.KubeClientQPS
+	managementConfig.Burst = opts.KubeClientOpts.KubeClientBurst
 
-	workloadKubeconfig := opts.KubeConfigPath
+	workloadKubeconfig := opts.KubeClientOpts.KubeConfigPath
 
 	workloadConfig, err := clientcmd.BuildConfigFromFlags("", workloadKubeconfig)
 	if err != nil {
 		klog.Fatalf("cannot build workload cluster config: %v", err)
 	}
+	workloadConfig.QPS = opts.KubeClientOpts.KubeClientQPS
+	workloadConfig.Burst = opts.KubeClientOpts.KubeClientBurst
 
 	// Grab a dynamic interface that we can create informers from
 	managementClient, err := dynamic.NewForConfig(managementConfig)

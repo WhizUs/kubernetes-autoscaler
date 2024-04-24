@@ -133,6 +133,11 @@ func (n *hetznerNodeGroup) IncreaseSize(delta int) error {
 	return nil
 }
 
+// AtomicIncreaseSize is not implemented.
+func (n *hetznerNodeGroup) AtomicIncreaseSize(delta int) error {
+	return cloudprovider.ErrNotImplemented
+}
+
 // DeleteNodes deletes nodes from this node group (and also increasing the size
 // of the node group with that). Error is returned either on failure or if the
 // given node doesn't belong to this node group. This function should wait
@@ -155,7 +160,7 @@ func (n *hetznerNodeGroup) DeleteNodes(nodes []*apiv1.Node) error {
 
 			err := n.manager.deleteByNode(node)
 			if err != nil {
-				klog.Errorf("failed to delete server ID %d error: %v", node.Name, err)
+				klog.Errorf("failed to delete server ID %s error: %v", node.Name, err)
 			}
 
 			waitGroup.Done()
@@ -223,10 +228,14 @@ func (n *hetznerNodeGroup) TemplateNodeInfo() (*schedulerframework.NodeInfo, err
 		return nil, fmt.Errorf("failed to create resource list for node group %s error: %v", n.id, err)
 	}
 
+	nodeName := newNodeName(n)
+
 	node := apiv1.Node{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:   newNodeName(n),
-			Labels: map[string]string{},
+			Name: nodeName,
+			Labels: map[string]string{
+				apiv1.LabelHostname: nodeName,
+			},
 		},
 		Status: apiv1.NodeStatus{
 			Capacity:   resourceList,
@@ -363,10 +372,10 @@ func getMachineTypeResourceList(m *hetznerManager, instanceType string) (apiv1.R
 
 	return apiv1.ResourceList{
 		// TODO somehow determine the actual pods that will be running
-		apiv1.ResourcePods:    *resource.NewQuantity(defaultPodAmountsLimit, resource.DecimalSI),
-		apiv1.ResourceCPU:     *resource.NewQuantity(int64(typeInfo.Cores), resource.DecimalSI),
-		apiv1.ResourceMemory:  *resource.NewQuantity(int64(typeInfo.Memory*1024*1024*1024), resource.DecimalSI),
-		apiv1.ResourceStorage: *resource.NewQuantity(int64(typeInfo.Disk*1024*1024*1024), resource.DecimalSI),
+		apiv1.ResourcePods:             *resource.NewQuantity(defaultPodAmountsLimit, resource.DecimalSI),
+		apiv1.ResourceCPU:              *resource.NewQuantity(int64(typeInfo.Cores), resource.DecimalSI),
+		apiv1.ResourceMemory:           *resource.NewQuantity(int64(typeInfo.Memory*1024*1024*1024), resource.DecimalSI),
+		apiv1.ResourceEphemeralStorage: *resource.NewQuantity(int64(typeInfo.Disk*1024*1024*1024), resource.DecimalSI),
 	}, nil
 }
 
@@ -450,12 +459,18 @@ func createServer(n *hetznerNodeGroup) error {
 		return fmt.Errorf("could not create server type %s in region %s: %v", n.instanceType, n.region, err)
 	}
 
-	action := serverCreateResult.Action
 	server := serverCreateResult.Server
-	err = waitForServerAction(n.manager, server.Name, action)
-	if err != nil {
-		_ = n.manager.deleteServer(server)
-		return fmt.Errorf("failed to start server %s error: %v", server.Name, err)
+
+	actions := []*hcloud.Action{serverCreateResult.Action}
+	actions = append(actions, serverCreateResult.NextActions...)
+
+	// Delete the server if any action (most importantly create_server & start_server) fails
+	for _, action := range actions {
+		err = waitForServerAction(n.manager, server.Name, action)
+		if err != nil {
+			_ = n.manager.deleteServer(server)
+			return fmt.Errorf("failed to start server %s error: %v", server.Name, err)
+		}
 	}
 
 	return nil

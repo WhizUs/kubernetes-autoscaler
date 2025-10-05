@@ -91,6 +91,17 @@ func (n *sksNodepoolNodeGroup) IncreaseSize(delta int) error {
 
 	n.sksNodepool.Size = &targetSize
 
+	// Invalidate cache for all instances in the underlying instance pool since new instances may have been created
+	instancePool, err := n.m.GetInstancePoolCached(n.m.ctx, n.m.zone, *n.sksNodepool.InstancePoolID)
+	if err != nil {
+		// Log error but don't fail - cache invalidation is not critical
+		errorf("unable to get instance pool for cache invalidation: %v", err)
+	} else {
+		n.m.InvalidateInstancePoolCache(instancePool)
+		// Also invalidate the instance pool cache entry itself since it may have changed
+		n.m.InvalidateInstancePoolCacheByID(*n.sksNodepool.InstancePoolID)
+	}
+
 	return nil
 }
 
@@ -127,6 +138,9 @@ func (n *sksNodepoolNodeGroup) DeleteNodes(nodes []*apiv1.Node) error {
 		errorf("unable to evict instances from SKS Nodepool %s: %v", *n.sksNodepool.ID, err)
 		return err
 	}
+
+	// Invalidate cache for deleted instances
+	n.m.InvalidateInstanceCacheMultiple(instanceIDs)
 
 	if err := n.waitUntilRunning(n.m.ctx); err != nil {
 		return err
@@ -169,7 +183,7 @@ func (n *sksNodepoolNodeGroup) Debug() string {
 // Other fields are optional.
 // This list should include also instances that might have not become a kubernetes node yet.
 func (n *sksNodepoolNodeGroup) Nodes() ([]cloudprovider.Instance, error) {
-	instancePool, err := n.m.client.GetInstancePool(n.m.ctx, n.m.zone, *n.sksNodepool.InstancePoolID)
+	instancePool, err := n.m.GetInstancePoolCached(n.m.ctx, n.m.zone, *n.sksNodepool.InstancePoolID)
 	if err != nil {
 		errorf(
 			"unable to retrieve Instance Pool %s managed by SKS Nodepool %s",
@@ -179,13 +193,15 @@ func (n *sksNodepoolNodeGroup) Nodes() ([]cloudprovider.Instance, error) {
 		return nil, err
 	}
 
-	nodes := make([]cloudprovider.Instance, len(*instancePool.InstanceIDs))
-	for i, id := range *instancePool.InstanceIDs {
-		instance, err := n.m.client.GetInstance(n.m.ctx, n.m.zone, id)
-		if err != nil {
-			errorf("unable to retrieve Compute instance %s: %v", id, err)
-			return nil, err
-		}
+	// Use batch method to get all instances efficiently
+	instances, err := n.m.GetInstancesCached(n.m.ctx, n.m.zone, *instancePool.InstanceIDs)
+	if err != nil {
+		errorf("unable to retrieve instances for nodepool %s: %v", *n.sksNodepool.ID, err)
+		return nil, err
+	}
+
+	nodes := make([]cloudprovider.Instance, len(instances))
+	for i, instance := range instances {
 		nodes[i] = toInstance(instance)
 	}
 
@@ -234,7 +250,7 @@ func (n *sksNodepoolNodeGroup) GetOptions(_ config.NodeGroupAutoscalingOptions) 
 
 func (n *sksNodepoolNodeGroup) waitUntilRunning(ctx context.Context) error {
 	return pollCmd(ctx, func() (bool, error) {
-		instancePool, err := n.m.client.GetInstancePool(ctx, n.m.zone, n.Id())
+		instancePool, err := n.m.GetInstancePoolCached(ctx, n.m.zone, n.Id())
 		if err != nil {
 			errorf("unable to retrieve Instance Pool %s: %s", n.Id(), err)
 			return false, err

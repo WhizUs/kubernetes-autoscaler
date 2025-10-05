@@ -90,6 +90,9 @@ func (n *instancePoolNodeGroup) IncreaseSize(delta int) error {
 
 	n.instancePool.Size = &targetSize
 
+	// Invalidate cache for all instances in the pool since new instances may have been created
+	n.m.InvalidateInstancePoolCache(n.instancePool)
+
 	return nil
 }
 
@@ -120,6 +123,9 @@ func (n *instancePoolNodeGroup) DeleteNodes(nodes []*apiv1.Node) error {
 		errorf("unable to evict instances from Instance Pool %s: %v", *n.instancePool.ID, err)
 		return err
 	}
+
+	// Invalidate cache for deleted instances
+	n.m.InvalidateInstanceCacheMultiple(instanceIDs)
 
 	if err := n.waitUntilRunning(n.m.ctx); err != nil {
 		return err
@@ -162,13 +168,15 @@ func (n *instancePoolNodeGroup) Debug() string {
 // Other fields are optional.
 // This list should include also instances that might have not become a kubernetes node yet.
 func (n *instancePoolNodeGroup) Nodes() ([]cloudprovider.Instance, error) {
-	nodes := make([]cloudprovider.Instance, len(*n.instancePool.InstanceIDs))
-	for i, id := range *n.instancePool.InstanceIDs {
-		instance, err := n.m.client.GetInstance(n.m.ctx, n.m.zone, id)
-		if err != nil {
-			errorf("unable to retrieve Compute instance %s: %v", id, err)
-			return nil, err
-		}
+	// Use batch method to get all instances efficiently
+	instances, err := n.m.GetInstancesCached(n.m.ctx, n.m.zone, *n.instancePool.InstanceIDs)
+	if err != nil {
+		errorf("unable to retrieve instances for instance pool %s: %v", *n.instancePool.ID, err)
+		return nil, err
+	}
+
+	nodes := make([]cloudprovider.Instance, len(instances))
+	for i, instance := range instances {
 		nodes[i] = toInstance(instance)
 	}
 
@@ -217,7 +225,7 @@ func (n *instancePoolNodeGroup) GetOptions(_ config.NodeGroupAutoscalingOptions)
 
 func (n *instancePoolNodeGroup) waitUntilRunning(ctx context.Context) error {
 	return pollCmd(ctx, func() (bool, error) {
-		instancePool, err := n.m.client.GetInstancePool(ctx, n.m.zone, n.Id())
+		instancePool, err := n.m.GetInstancePoolCached(ctx, n.m.zone, n.Id())
 		if err != nil {
 			errorf("unable to retrieve Instance Pool %s: %s", n.Id(), err)
 			return false, err

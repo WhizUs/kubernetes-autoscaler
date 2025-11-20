@@ -59,6 +59,21 @@ func (e *exoscaleCloudProvider) NodeGroups() []cloudprovider.NodeGroup {
 // should not be processed by cluster autoscaler, or non-nil error if such
 // occurred. Must be implemented.
 func (e *exoscaleCloudProvider) NodeGroupForNode(node *apiv1.Node) (cloudprovider.NodeGroup, error) {
+	// Fast path: Check for nodepool-id label to avoid API calls
+	if nodepoolID, hasLabel := node.Labels["node.exoscale.net/nodepool-id"]; hasLabel {
+		// Try to find existing nodegroup with this SKS nodepool ID
+		for _, ng := range e.manager.nodeGroups {
+			// Check if this is an SKS nodepool nodegroup
+			if sksNG, ok := ng.(*sksNodepoolNodeGroup); ok {
+				if *sksNG.sksNodepool.ID == nodepoolID {
+					debugf("found SKS nodegroup %s for node %s using nodepool-id label", nodepoolID, node.Name)
+					return ng, nil
+				}
+			}
+		}
+		debugf("nodepool-id label found (%s) but no matching SKS nodegroup, falling back to API lookup", nodepoolID)
+	}
+
 	instancePool, err := e.instancePoolFromNode(node)
 	if err != nil {
 		if err == errNoInstancePool {
@@ -77,7 +92,7 @@ func (e *exoscaleCloudProvider) NodeGroupForNode(node *apiv1.Node) (cloudprovide
 			sksNodepool *egoscale.SKSNodepool
 		)
 
-		sksClusters, err := e.manager.client.ListSKSClusters(e.manager.ctx, e.manager.zone)
+		sksClusters, err := e.manager.ListSKSClustersCached(e.manager.ctx, e.manager.zone)
 		if err != nil {
 			errorf("unable to list SKS clusters: %v", err)
 			return nil, err
@@ -264,7 +279,7 @@ func (e *exoscaleCloudProvider) instancePoolFromNode(node *apiv1.Node) (*egoscal
 
 	debugf("looking up node group for node ID %s", nodeID)
 
-	instance, err := e.manager.client.GetInstance(e.manager.ctx, e.manager.zone, nodeID)
+	instance, err := e.manager.GetInstanceCached(e.manager.ctx, e.manager.zone, nodeID)
 	if err != nil {
 		return nil, err
 	}
@@ -273,5 +288,5 @@ func (e *exoscaleCloudProvider) instancePoolFromNode(node *apiv1.Node) (*egoscal
 		return nil, errNoInstancePool
 	}
 
-	return e.manager.client.GetInstancePool(e.manager.ctx, e.manager.zone, instance.Manager.ID)
+	return e.manager.GetInstancePoolCached(e.manager.ctx, e.manager.zone, instance.Manager.ID)
 }

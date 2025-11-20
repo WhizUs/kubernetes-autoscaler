@@ -1,0 +1,27 @@
+/speckit.constitution no major changes in architecture or structure. work only on the exoscale cloudprovider. for new features, look at how other cloudproviders implemented something, and if reasonable, do it similarly. reasonable tests must be written for each code change/function. if possible, dependencies should be reused from other cloudproviders, that means if new dependencies are required, we should first look at other cloudproviders code and see if they use a dependency which does the job. the cloudproviders are at ./cloudprovider/. we must only change code within the exoscale cloudprovider directory.
+
+/speckit.specify Implement caching for all calls to the Exoscale API, in order to increase performance. Cache instances for 5 minutes. Cache quota for 1 hour.  Cache SKS clusters for 10 minutes. Cache instance pools for 5 minutes. Implement Jitter for the api calls. Once all is implemented, consecutive function loops should not need any further api calls, they should only need to read the cached objects.
+
+/speckit.clarify
+
+/speckit.plan The new feature is implemented according to the specification and guidelines
+
+/speckit.tasks
+
+/speckit.implement
+
+
+
+
+
+
+
+
+
+
+
+Based on the conversation, encode the learnings and the experience pieces (NOT THE TECHNICAL DETAILS) into spec.md for the current feature.
+
+Let's transform the learnings into relevant functional requirements in the spec.
+
+

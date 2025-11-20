@@ -78,21 +78,33 @@ func (m *exoscaleClientMock) EvictSKSNodepoolMembers(
 
 func (m *exoscaleClientMock) GetInstance(ctx context.Context, zone, id string) (*egoscale.Instance, error) {
 	args := m.Called(ctx, zone, id)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
 	return args.Get(0).(*egoscale.Instance), args.Error(1)
 }
 
 func (m *exoscaleClientMock) GetInstancePool(ctx context.Context, zone, id string) (*egoscale.InstancePool, error) {
 	args := m.Called(ctx, zone, id)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
 	return args.Get(0).(*egoscale.InstancePool), args.Error(1)
 }
 
 func (m *exoscaleClientMock) GetQuota(ctx context.Context, zone string, resource string) (*egoscale.Quota, error) {
 	args := m.Called(ctx, zone, resource)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
 	return args.Get(0).(*egoscale.Quota), args.Error(1)
 }
 
 func (m *exoscaleClientMock) ListSKSClusters(ctx context.Context, zone string) ([]*egoscale.SKSCluster, error) {
 	args := m.Called(ctx, zone)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
 	return args.Get(0).([]*egoscale.SKSCluster), args.Error(1)
 }
 
@@ -430,6 +442,249 @@ func (ts *cloudProviderTestSuite) TestExoscaleCloudProvider_NodeGroups() {
 	// ---------------------------------------------------------------
 
 	ts.Require().Len(ts.p.NodeGroups(), 2)
+}
+
+// TestCache_NodeGroupForNode_CachesSKSClusters verifies that NodeGroupForNode uses cached SKS clusters
+func (ts *cloudProviderTestSuite) TestCache_NodeGroupForNode_CachesSKSClusters() {
+	mockClient := new(exoscaleClientMock)
+	cache := newExoscaleCache(mockClient, false) // Disable jitter for deterministic testing
+	ts.p.manager.client = cache
+
+	// Mock ListSKSClusters - should only be called once due to caching
+	mockClient.On("ListSKSClusters", ts.p.manager.ctx, ts.p.manager.zone).
+		Return(
+			[]*egoscale.SKSCluster{{
+				ID:   &testSKSClusterID,
+				Name: &testSKSClusterName,
+				Nodepools: []*egoscale.SKSNodepool{{
+					ID:             &testSKSNodepoolID,
+					InstancePoolID: &testInstancePoolID,
+					Name:           &testSKSNodepoolName,
+				}},
+			}},
+			nil,
+		).Once()
+
+	mockClient.On("GetQuota", ts.p.manager.ctx, ts.p.manager.zone, testComputeInstanceQuotaName).
+		Return(
+			&egoscale.Quota{
+				Resource: &testComputeInstanceQuotaName,
+				Usage:    &testComputeInstanceQuotaUsage,
+				Limit:    &testComputeInstanceQuotaLimit,
+			},
+			nil,
+		).Once()
+
+	mockClient.On("GetInstancePool", ts.p.manager.ctx, ts.p.manager.zone, testInstancePoolID).
+		Return(
+			&egoscale.InstancePool{
+				ID: &testInstancePoolID,
+				Manager: &egoscale.InstancePoolManager{
+					ID:   testSKSNodepoolID,
+					Type: "sks-nodepool",
+				},
+				Name: &testInstancePoolName,
+			},
+			nil,
+		).Once()
+
+	mockClient.On("GetInstance", ts.p.manager.ctx, ts.p.manager.zone, testInstanceID).
+		Return(
+			&egoscale.Instance{
+				ID:   &testInstanceID,
+				Name: &testInstanceName,
+				Manager: &egoscale.InstanceManager{
+					ID:   testInstancePoolID,
+					Type: "instance-pool",
+				},
+			},
+			nil,
+		).Once()
+
+	// First call - populates cache
+	nodeGroup1, err := ts.p.NodeGroupForNode(&apiv1.Node{
+		Spec: apiv1.NodeSpec{
+			ProviderID: toProviderID(testInstanceID),
+		},
+		ObjectMeta: v1.ObjectMeta{
+			Labels: map[string]string{
+				"topology.kubernetes.io/region": testZone,
+			},
+		},
+	})
+	ts.Require().NoError(err)
+	ts.Require().NotNil(nodeGroup1)
+
+	// Second call within TTL - uses cache, no additional API calls
+	nodeGroup2, err := ts.p.NodeGroupForNode(&apiv1.Node{
+		Spec: apiv1.NodeSpec{
+			ProviderID: toProviderID(testInstanceID),
+		},
+		ObjectMeta: v1.ObjectMeta{
+			Labels: map[string]string{
+				"topology.kubernetes.io/region": testZone,
+			},
+		},
+	})
+	ts.Require().NoError(err)
+	ts.Require().NotNil(nodeGroup2)
+
+	// Verify all mocks were called exactly the expected number of times
+	mockClient.AssertExpectations(ts.T())
+}
+
+// TestCache_Nodes_UsesCachedInstances verifies that Nodes() uses cached instances
+func (ts *cloudProviderTestSuite) TestCache_Nodes_UsesCachedInstances() {
+	mockClient := new(exoscaleClientMock)
+	cache := newExoscaleCache(mockClient, false)
+	ts.p.manager.client = cache
+
+	// Create an instance pool node group
+	instanceIDs := []string{testInstanceID}
+	ng := &instancePoolNodeGroup{
+		m: ts.p.manager,
+		instancePool: &egoscale.InstancePool{
+			ID:          &testInstancePoolID,
+			Name:        &testInstancePoolName,
+			InstanceIDs: &instanceIDs,
+		},
+	}
+
+	// Mock GetInstance - should only be called once due to caching
+	mockClient.On("GetInstance", ts.p.manager.ctx, ts.p.manager.zone, testInstanceID).
+		Return(
+			&egoscale.Instance{
+				ID:    &testInstanceID,
+				Name:  &testInstanceName,
+				State: &testInstanceState,
+			},
+			nil,
+		).Once()
+
+	// First call - cache miss
+	nodes1, err := ng.Nodes()
+	ts.Require().NoError(err)
+	ts.Require().Len(nodes1, 1)
+
+	// Second call within TTL - cache hit
+	nodes2, err := ng.Nodes()
+	ts.Require().NoError(err)
+	ts.Require().Len(nodes2, 1)
+
+	// Verify GetInstance was only called once
+	mockClient.AssertExpectations(ts.T())
+}
+
+// TestCache_Refresh_BenefitsFromCache verifies that Refresh() benefits from cached pools
+func (ts *cloudProviderTestSuite) TestCache_Refresh_BenefitsFromCache() {
+	mockClient := new(exoscaleClientMock)
+	cache := newExoscaleCache(mockClient, false)
+	ts.p.manager.client = cache
+
+	// Add a node group to the manager
+	ts.p.manager.nodeGroups = []cloudprovider.NodeGroup{
+		&instancePoolNodeGroup{
+			m: ts.p.manager,
+			instancePool: &egoscale.InstancePool{
+				ID:   &testInstancePoolID,
+				Name: &testInstancePoolName,
+			},
+		},
+	}
+
+	// Mock GetInstancePool - should only be called once due to caching
+	mockClient.On("GetInstancePool", ts.p.manager.ctx, ts.p.manager.zone, testInstancePoolID).
+		Return(
+			&egoscale.InstancePool{
+				ID:   &testInstancePoolID,
+				Name: &testInstancePoolName,
+			},
+			nil,
+		).Once()
+
+	// First refresh - cache miss
+	err := ts.p.manager.Refresh()
+	ts.Require().NoError(err)
+	ts.Require().Len(ts.p.manager.nodeGroups, 1)
+
+	// Second refresh within TTL - cache hit, no API call
+	err = ts.p.manager.Refresh()
+	ts.Require().NoError(err)
+	ts.Require().Len(ts.p.manager.nodeGroups, 1)
+
+	// Verify GetInstancePool was only called once
+	mockClient.AssertExpectations(ts.T())
+}
+
+// TestCache_ConsecutiveLoops_ZeroAPICalls verifies consecutive autoscaler loops use only cache
+func (ts *cloudProviderTestSuite) TestCache_ConsecutiveLoops_ZeroAPICalls() {
+	mockClient := new(exoscaleClientMock)
+	cache := newExoscaleCache(mockClient, false)
+	ts.p.manager.client = cache
+
+	// Setup: Add node groups to manager
+	instanceIDs := []string{testInstanceID}
+	ts.p.manager.nodeGroups = []cloudprovider.NodeGroup{
+		&instancePoolNodeGroup{
+			m: ts.p.manager,
+			instancePool: &egoscale.InstancePool{
+				ID:          &testInstancePoolID,
+				Name:        &testInstancePoolName,
+				InstanceIDs: &instanceIDs,
+			},
+		},
+	}
+
+	// Mock API calls - each should only be called ONCE in first loop
+	poolInstanceIDs := []string{testInstanceID}
+	mockClient.On("GetInstancePool", ts.p.manager.ctx, ts.p.manager.zone, testInstancePoolID).
+		Return(
+			&egoscale.InstancePool{
+				ID:          &testInstancePoolID,
+				Name:        &testInstancePoolName,
+				InstanceIDs: &poolInstanceIDs,
+			},
+			nil,
+		).Once()
+
+	mockClient.On("GetInstance", ts.p.manager.ctx, ts.p.manager.zone, testInstanceID).
+		Return(
+			&egoscale.Instance{
+				ID:    &testInstanceID,
+				Name:  &testInstanceName,
+				State: &testInstanceState,
+			},
+			nil,
+		).Once()
+
+	// Simulate autoscaler loop 1: Refresh + Nodes
+	err := ts.p.manager.Refresh()
+	ts.Require().NoError(err)
+
+	ng := ts.p.manager.nodeGroups[0].(*instancePoolNodeGroup)
+	nodes1, err := ng.Nodes()
+	ts.Require().NoError(err)
+	ts.Require().Len(nodes1, 1)
+
+	// Simulate autoscaler loop 2: Refresh + Nodes (within TTL - cache hits)
+	err = ts.p.manager.Refresh()
+	ts.Require().NoError(err)
+
+	nodes2, err := ng.Nodes()
+	ts.Require().NoError(err)
+	ts.Require().Len(nodes2, 1)
+
+	// Simulate autoscaler loop 3: Refresh + Nodes (within TTL - cache hits)
+	err = ts.p.manager.Refresh()
+	ts.Require().NoError(err)
+
+	nodes3, err := ng.Nodes()
+	ts.Require().NoError(err)
+	ts.Require().Len(nodes3, 1)
+
+	// Verify API calls only happened once (first loop)
+	// Subsequent loops used cache exclusively
+	mockClient.AssertExpectations(ts.T())
 }
 
 func TestSuiteExoscaleCloudProvider(t *testing.T) {

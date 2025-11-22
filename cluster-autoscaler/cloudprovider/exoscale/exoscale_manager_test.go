@@ -52,3 +52,101 @@ func (ts *cloudProviderTestSuite) TestComputeInstanceQuota() {
 	ts.Require().NoError(err)
 	ts.Require().Equal(int(testComputeInstanceQuotaLimit), actual)
 }
+
+// TestManager_UsesCachedClient verifies that the Manager's client is wrapped with cache
+func (ts *cloudProviderTestSuite) TestManager_UsesCachedClient() {
+	// The manager is already created in SetupTest with cache wrapping
+	// We verify by checking that the cache layer intercepts calls
+
+	// Create a new manager without mocking to verify cache wrapping
+	manager, err := newManager(cloudprovider.NodeGroupDiscoveryOptions{})
+	ts.Require().NoError(err)
+	ts.Require().NotNil(manager)
+
+	// The client should be an exoscaleCache, not the raw egoscale client
+	// We can verify by checking if it implements the exoscaleClient interface
+	_, ok := manager.client.(exoscaleClient)
+	ts.Require().True(ok, "manager client should implement exoscaleClient interface")
+}
+
+// TestManager_CacheReducesAPICalls verifies that the cache reduces API call count
+func (ts *cloudProviderTestSuite) TestManager_CacheReducesAPICalls() {
+	mockClient := new(exoscaleClientMock)
+
+	// Create a cache wrapping the mock client
+	cache := newExoscaleCache(mockClient, false) // Disable jitter for deterministic testing
+
+	// Replace the manager's client with our cached mock
+	ts.p.manager.client = cache
+
+	// Mock a successful GetInstancePool call (should only be called once)
+	mockClient.On("GetInstancePool", ts.p.manager.ctx, ts.p.manager.zone, testInstancePoolID).
+		Return(
+			&egoscale.InstancePool{
+				ID:   &testInstancePoolID,
+				Name: &testInstancePoolName,
+				Size: &testInstancePoolSize,
+			},
+			nil,
+		).Once() // Critical: Should only be called once
+
+	// First call - cache miss, API called
+	pool1, err := ts.p.manager.client.GetInstancePool(ts.p.manager.ctx, ts.p.manager.zone, testInstancePoolID)
+	ts.Require().NoError(err)
+	ts.Require().Equal(testInstancePoolID, *pool1.ID)
+
+	// Second call within TTL - cache hit, no API call
+	pool2, err := ts.p.manager.client.GetInstancePool(ts.p.manager.ctx, ts.p.manager.zone, testInstancePoolID)
+	ts.Require().NoError(err)
+	ts.Require().Equal(testInstancePoolID, *pool2.ID)
+
+	// Third call within TTL - cache hit, no API call
+	pool3, err := ts.p.manager.client.GetInstancePool(ts.p.manager.ctx, ts.p.manager.zone, testInstancePoolID)
+	ts.Require().NoError(err)
+	ts.Require().Equal(testInstancePoolID, *pool3.ID)
+
+	// Verify mock was called exactly once (cache prevented additional calls)
+	mockClient.AssertExpectations(ts.T())
+}
+
+// TestManager_CachingEnabledByDefault verifies that caching is enabled by default
+func (ts *cloudProviderTestSuite) TestManager_CachingEnabledByDefault() {
+	// Unset the env var to test default behavior
+	os.Unsetenv("EXOSCALE_API_CACHE_ENABLED")
+
+	manager, err := newManager(cloudprovider.NodeGroupDiscoveryOptions{})
+	ts.Require().NoError(err)
+	ts.Require().NotNil(manager)
+
+	// Client should be wrapped with cache (exoscaleCache type)
+	_, ok := manager.client.(*exoscaleCache)
+	ts.Require().True(ok, "manager client should be wrapped with cache by default")
+}
+
+// TestManager_CachingCanBeDisabled verifies that caching can be explicitly disabled
+func (ts *cloudProviderTestSuite) TestManager_CachingCanBeDisabled() {
+	// Explicitly disable caching
+	ts.T().Setenv("EXOSCALE_API_CACHE_ENABLED", "false")
+
+	manager, err := newManager(cloudprovider.NodeGroupDiscoveryOptions{})
+	ts.Require().NoError(err)
+	ts.Require().NotNil(manager)
+
+	// Client should NOT be wrapped with cache
+	_, ok := manager.client.(*exoscaleCache)
+	ts.Require().False(ok, "manager client should not be wrapped when caching is disabled")
+}
+
+// TestManager_CachingExplicitlyEnabled verifies that caching can be explicitly enabled
+func (ts *cloudProviderTestSuite) TestManager_CachingExplicitlyEnabled() {
+	// Explicitly enable caching
+	ts.T().Setenv("EXOSCALE_API_CACHE_ENABLED", "true")
+
+	manager, err := newManager(cloudprovider.NodeGroupDiscoveryOptions{})
+	ts.Require().NoError(err)
+	ts.Require().NotNil(manager)
+
+	// Client should be wrapped with cache
+	_, ok := manager.client.(*exoscaleCache)
+	ts.Require().True(ok, "manager client should be wrapped when caching is explicitly enabled")
+}

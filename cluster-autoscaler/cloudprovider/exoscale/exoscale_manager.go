@@ -80,11 +80,21 @@ func newManager(discoveryOpts cloudprovider.NodeGroupDiscoveryOptions) (*Manager
 		return nil, err
 	}
 
-	debugf("initializing manager with zone=%s environment=%s", zone, apiEnvironment)
+	// Check if caching should be enabled (default: true)
+	var wrappedClient exoscaleClient
+	cachingEnabled := os.Getenv("EXOSCALE_API_CACHE_ENABLED")
+	if cachingEnabled == "" || cachingEnabled == "true" || cachingEnabled == "1" {
+		// Wrap client with caching layer (jitter enabled by default)
+		wrappedClient = newExoscaleCache(client, true)
+		debugf("initializing manager with zone=%s environment=%s (caching enabled)", zone, apiEnvironment)
+	} else {
+		wrappedClient = client
+		debugf("initializing manager with zone=%s environment=%s (caching disabled)", zone, apiEnvironment)
+	}
 
 	m := &Manager{
 		ctx:           exoapi.WithEndpoint(context.Background(), exoapi.NewReqEndpoint(apiEnvironment, zone)),
-		client:        client,
+		client:        wrappedClient,
 		zone:          zone,
 		discoveryOpts: discoveryOpts,
 	}
